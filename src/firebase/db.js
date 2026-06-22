@@ -1,50 +1,55 @@
 import {
-  doc, setDoc, getDoc, updateDoc, increment, arrayUnion
-} from 'firebase/firestore'
-import {
-  ref, set, get, update, onValue, off, push, remove, serverTimestamp
+  ref, set, get, update, onValue, off, push, remove, serverTimestamp, increment
 } from 'firebase/database'
-import { firestore, rtdb } from './config.js'
+import { rtdb } from './config.js'
 
-// ── Firestore: user profiles ─────────────────────────────────
+// ── User profiles (stored in RTDB /users/{uid}) ───────────────
 
 export async function createUserProfile(uid, displayName) {
-  await setDoc(doc(firestore, 'users', uid), {
+  await set(ref(rtdb, `users/${uid}`), {
     displayName,
     currency: 0,
     weaponSkins: ['default'],
     equippedSkin: 'default',
     stats: { gamesPlayed: 0, hiderWins: 0, seekerWins: 0, timesEliminated: 0 },
-    friends: [],
-    createdAt: new Date().toISOString()
+    createdAt: Date.now()
   })
 }
 
 export async function getUserProfile(uid) {
-  const snap = await getDoc(doc(firestore, 'users', uid))
-  return snap.exists() ? { uid, ...snap.data() } : null
+  const snap = await get(ref(rtdb, `users/${uid}`))
+  return snap.exists() ? { uid, ...snap.val() } : null
 }
 
 export async function incrementStats(uid, delta) {
-  const userRef = doc(firestore, 'users', uid)
   const updates = {}
-  for (const [k, v] of Object.entries(delta)) updates[`stats.${k}`] = increment(v)
-  await updateDoc(userRef, updates)
-}
-
-export async function addFriend(uid, friendUid) {
-  await updateDoc(doc(firestore, 'users', uid), { friends: arrayUnion(friendUid) })
+  for (const [k, v] of Object.entries(delta)) {
+    if (v !== 0) updates[`users/${uid}/stats/${k}`] = increment(v)
+  }
+  if (Object.keys(updates).length) await update(ref(rtdb), updates)
 }
 
 export async function spendCurrency(uid, amount) {
-  await updateDoc(doc(firestore, 'users', uid), { currency: increment(-amount) })
+  await update(ref(rtdb, `users/${uid}`), { currency: increment(-amount) })
 }
 
 export async function earnCurrency(uid, amount) {
-  await updateDoc(doc(firestore, 'users', uid), { currency: increment(amount) })
+  await update(ref(rtdb, `users/${uid}`), { currency: increment(amount) })
 }
 
-// ── Realtime DB: game rooms ───────────────────────────────────
+export async function updateEquippedSkin(uid, skinId) {
+  await update(ref(rtdb, `users/${uid}`), { equippedSkin: skinId })
+}
+
+export async function addOwnedSkin(uid, skinId) {
+  const snap = await get(ref(rtdb, `users/${uid}/weaponSkins`))
+  const current = snap.val() || ['default']
+  if (!current.includes(skinId)) {
+    await set(ref(rtdb, `users/${uid}/weaponSkins`), [...current, skinId])
+  }
+}
+
+// ── Game rooms (RTDB /games/{gameId}) ────────────────────────
 
 function genCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -52,23 +57,23 @@ function genCode() {
 }
 
 export async function createGame(hostId, displayName, settings) {
-  const code = genCode()
+  const code    = genCode()
   const gameRef = push(ref(rtdb, 'games'))
-  const gameId = gameRef.key
+  const gameId  = gameRef.key
 
   await set(gameRef, {
     hostId,
     code,
     settings: {
-      prepTime: settings.prepTime ?? 120,
-      seekerCount: settings.seekerCount ?? 1,
+      prepTime:      settings.prepTime      ?? 120,
+      seekerCount:   settings.seekerCount   ?? 1,
       shadowsEnabled: settings.shadowsEnabled !== false,
-      maxPlayers: 10
+      maxPlayers:    10
     },
-    status: 'lobby',
-    createdAt: serverTimestamp(),
-    winner: null,
-    players: {}
+    status:    'lobby',
+    createdAt: Date.now(),
+    winner:    null,
+    players:   {}
   })
 
   await joinGame(gameId, hostId, displayName)
@@ -89,16 +94,16 @@ export async function findGameByCode(code) {
 export async function joinGame(gameId, uid, displayName) {
   await set(ref(rtdb, `games/${gameId}/players/${uid}`), {
     displayName,
-    role: null,
+    role:     null,
     position: { x: 2, y: 0, z: 2 },
     rotationY: 0,
-    pose: 'stand',
+    pose:     'stand',
     paintColors: {
       head: '#808080', torso: '#808080',
       leftArm: '#808080', rightArm: '#808080',
       leftLeg: '#808080', rightLeg: '#808080'
     },
-    alive: true,
+    alive:   true,
     isReady: false
   })
 }
@@ -153,8 +158,4 @@ export async function startGamePhase(gameId) {
 
 export async function endGame(gameId, winner) {
   await update(ref(rtdb, `games/${gameId}`), { status: 'ended', winner })
-}
-
-export async function updateGameSettings(gameId, settings) {
-  await update(ref(rtdb, `games/${gameId}/settings`), settings)
 }

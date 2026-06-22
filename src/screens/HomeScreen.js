@@ -1,7 +1,5 @@
-import { logout }        from '../firebase/auth.js'
-import { getUserProfile, spendCurrency } from '../firebase/db.js'
-import { doc, updateDoc, arrayUnion } from 'firebase/firestore'
-import { firestore } from '../firebase/config.js'
+import { logout } from '../firebase/auth.js'
+import { getUserProfile, spendCurrency, updateEquippedSkin, addOwnedSkin } from '../firebase/db.js'
 
 const WEAPON_SKINS = [
   { id: 'default',   name: 'Stock Can',    price: 0,    color: '#7a7060' },
@@ -171,7 +169,7 @@ export class HomeScreen {
       if (owned.includes(skinId)) {
         // Equip it
         try {
-          await updateDoc(doc(firestore, 'users', this.user.uid), { equippedSkin: skinId })
+          await updateEquippedSkin(this.user.uid, skinId)
           this.profile.equippedSkin = skinId
           this.el.querySelector('#shop-grid').innerHTML = this.shopHTML()
         } catch (_) {}
@@ -186,10 +184,8 @@ export class HomeScreen {
 
       try {
         await spendCurrency(this.user.uid, price)
-        await updateDoc(doc(firestore, 'users', this.user.uid), {
-          weaponSkins: arrayUnion(skinId),
-          equippedSkin: skinId
-        })
+        await addOwnedSkin(this.user.uid, skinId)
+        await updateEquippedSkin(this.user.uid, skinId)
         this.profile.currency -= price
         this.profile.weaponSkins = [...owned, skinId]
         this.profile.equippedSkin = skinId
