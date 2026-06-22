@@ -1,11 +1,11 @@
 import * as THREE from 'three'
 
-const SPEED_STAND  = 6.0
-const SPEED_CROUCH = 3.2
-const SPEED_PRONE  = 1.8
+const SPEED_STAND  = 5.5
+const SPEED_RUN    = 9.5
+const SPEED_CROUCH = 3.0
+const SPEED_PRONE  = 1.6
 const CAM_DIST     = 4.5
 const CAM_HEIGHT   = 1.8
-const CAM_SMOOTH   = 0.12
 
 export class PlayerController {
   constructor(character, camera, wallBoxes, canvas) {
@@ -14,65 +14,87 @@ export class PlayerController {
     this.wallBoxes = wallBoxes
     this.canvas    = canvas
 
-    this.vel      = new THREE.Vector3()
-    this.yaw      = 0   // horizontal camera angle
-    this.pitch    = 0.3 // vertical camera angle (radians)
-    this.keys     = {}
-    this.locked   = false // pointer lock active
-    this.moving   = false
-    this.time     = 0
-    this.pose     = 'stand'
+    this.yaw     = 0
+    this.pitch   = 0.25
+    this.keys    = {}
+    this.locked  = false
+    this.moving  = false
+    this.running = false
+    this.paused  = false
+    this.pose    = 'stand'
+    this.time    = 0
 
-    // Camera target (smooth follow)
     this._camPos = new THREE.Vector3()
+    this._camTarget = new THREE.Vector3()
 
+    this._buildHint()
     this._bindInput()
-    this._requestPointerLock()
   }
 
-  _bindInput() {
-    this._onKey = e => {
-      const k = e.code.toLowerCase()
-      this.keys[k] = e.type === 'keydown'
-    }
-    this._onMouseMove = e => {
-      if (!this.locked) return
-      this.yaw   -= e.movementX * 0.002
-      this.pitch -= e.movementY * 0.002
-      this.pitch  = Math.max(-0.6, Math.min(0.7, this.pitch))
-    }
-    this._onLockChange = () => {
-      this.locked = document.pointerLockElement === this.canvas
-    }
-
-    document.addEventListener('keydown',            this._onKey)
-    document.addEventListener('keyup',              this._onKey)
-    document.addEventListener('mousemove',          this._onMouseMove)
-    document.addEventListener('pointerlockchange',  this._onLockChange)
-
-    this.canvas.addEventListener('click', () => this._requestPointerLock())
-  }
-
-  _requestPointerLock() {
-    this.canvas.requestPointerLock?.()
-  }
-
+  // "Click to look around" overlay shown when pointer lock is inactive
   setPose(pose) {
     this.pose = pose
     this.character.setPose(pose)
   }
 
+  _buildHint() {
+    this._hint = document.createElement('div')
+    this._hint.style.cssText = `
+      position:fixed; bottom:80px; left:50%; transform:translateX(-50%);
+      background:rgba(36,28,14,0.82); color:#f4ede0;
+      font-family:'Bangers',cursive; font-size:20px; letter-spacing:2px;
+      padding:8px 22px; border-radius:8px; border:2px solid #808070;
+      pointer-events:none; z-index:22; transition:opacity .3s;
+    `
+    this._hint.textContent = 'CLICK TO LOOK AROUND'
+    document.body.appendChild(this._hint)
+  }
+
+  _bindInput() {
+    this._onKey = e => {
+      this.keys[e.code.toLowerCase()] = e.type === 'keydown'
+    }
+
+    this._onMouseMove = e => {
+      if (!this.locked) return
+      this.yaw   -= e.movementX * 0.0022
+      this.pitch  = Math.max(-0.55, Math.min(0.65,
+        this.pitch - e.movementY * 0.0022
+      ))
+    }
+
+    this._onLockChange = () => {
+      this.locked = document.pointerLockElement === this.canvas
+      this._hint.style.opacity = this.locked ? '0' : '1'
+    }
+
+    document.addEventListener('keydown', this._onKey)
+    document.addEventListener('keyup',   this._onKey)
+    document.addEventListener('mousemove', this._onMouseMove)
+    document.addEventListener('pointerlockchange', this._onLockChange)
+
+    // Click canvas → request pointer lock (only when not in paint mode)
+    this.canvas.addEventListener('click', () => {
+      if (!this.locked) this.canvas.requestPointerLock?.()
+    })
+  }
+
   update(delta) {
     this.time += delta
-    if (this.paused) return
+    if (this.paused) { this._updateCamera(); return }
+
+    this.running = this.keys['shiftleft'] || this.keys['shiftright']
 
     const speed = this.pose === 'crouch' ? SPEED_CROUCH
                 : this.pose === 'prone'  ? SPEED_PRONE
+                : this.running           ? SPEED_RUN
                 : SPEED_STAND
 
-    // Movement direction relative to camera yaw
-    const forward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw))
-    const right   = new THREE.Vector3( Math.cos(this.yaw), 0, -Math.sin(this.yaw))
+    // Movement vectors relative to camera yaw
+    const sinY = Math.sin(this.yaw)
+    const cosY = Math.cos(this.yaw)
+    const forward = new THREE.Vector3(-sinY, 0, -cosY)
+    const right   = new THREE.Vector3( cosY, 0, -sinY)
 
     const move = new THREE.Vector3()
     if (this.keys['keyw'] || this.keys['arrowup'])    move.addScaledVector(forward,  1)
@@ -80,72 +102,55 @@ export class PlayerController {
     if (this.keys['keyd'] || this.keys['arrowright']) move.addScaledVector(right,    1)
     if (this.keys['keya'] || this.keys['arrowleft'])  move.addScaledVector(right,   -1)
 
-    this.moving = move.lengthSq() > 0
+    this.moving = move.lengthSq() > 0.001
     if (this.moving) move.normalize().multiplyScalar(speed * delta)
 
-    // Resolve X and Z separately for smooth wall sliding
+    // Slide collision on X and Z axes separately
     const pos = this.character.group.position
-    const RADIUS = 0.35
+    const R = 0.35
+    const H = 1.9
 
-    const newX = pos.x + move.x
-    const boxX = new THREE.Box3(
-      new THREE.Vector3(newX - RADIUS, 0.01, pos.z - RADIUS),
-      new THREE.Vector3(newX + RADIUS, 2.0,  pos.z + RADIUS)
-    )
-    if (!this._collides(boxX)) pos.x = newX
+    const tryX = pos.x + move.x
+    if (!this._hits(tryX, pos.y, pos.z, R, H)) pos.x = tryX
 
-    const newZ = pos.z + move.z
-    const boxZ = new THREE.Box3(
-      new THREE.Vector3(pos.x - RADIUS, 0.01, newZ - RADIUS),
-      new THREE.Vector3(pos.x + RADIUS, 2.0,  newZ + RADIUS)
-    )
-    if (!this._collides(boxZ)) pos.z = newZ
+    const tryZ = pos.z + move.z
+    if (!this._hits(pos.x, pos.y, tryZ, R, H)) pos.z = tryZ
 
-    // Floor clamp
+    // Keep on floor
     pos.y = 0
 
-    // Rotate character to face movement direction
+    // Rotate character to face move direction
     if (this.moving) {
       const angle = Math.atan2(move.x, move.z)
-      this.character.group.rotation.y = angle
+      this.character.group.rotation.y = THREE.MathUtils.lerp(
+        this.character.group.rotation.y, angle, 0.2
+      )
     }
 
-    // Walking animation
-    this.character.animateWalk(this.moving, delta, this.time)
-
-    // Camera follow
+    this.character.animate(delta, this.moving, this.pose, this.running)
     this._updateCamera()
   }
 
-  _collides(box) {
-    for (const wall of this.wallBoxes) {
-      if (box.intersectsBox(wall)) return true
-    }
-    return false
+  _hits(x, y, z, r, h) {
+    const box = new THREE.Box3(
+      new THREE.Vector3(x - r, y + 0.05, z - r),
+      new THREE.Vector3(x + r, y + h,    z + r)
+    )
+    return this.wallBoxes.some(w => box.intersectsBox(w))
   }
 
   _updateCamera() {
     const pos = this.character.group.position
 
-    // Orbit position behind player
-    const targetX = pos.x + Math.sin(this.yaw) * CAM_DIST
-    const targetY = pos.y + CAM_HEIGHT + this.pitch * 1.5
-    const targetZ = pos.z + Math.cos(this.yaw) * CAM_DIST
+    const tx = pos.x + Math.sin(this.yaw) * CAM_DIST
+    const ty = pos.y + CAM_HEIGHT + this.pitch * 2.2
+    const tz = pos.z + Math.cos(this.yaw) * CAM_DIST
 
-    // Smooth
-    this._camPos.lerp(new THREE.Vector3(targetX, targetY, targetZ), CAM_SMOOTH)
-    this.camera.position.copy(this._camPos)
+    // Direct camera — no lag, feels responsive
+    this.camera.position.set(tx, ty, tz)
 
-    // Look at head level
-    const lookAt = new THREE.Vector3(pos.x, pos.y + 1.1, pos.z)
-    this.camera.lookAt(lookAt)
-  }
-
-  // For paint eyedropper — returns camera ray direction from screen center
-  getCameraRay() {
-    const dir = new THREE.Vector3()
-    this.camera.getWorldDirection(dir)
-    return { origin: this.camera.position.clone(), direction: dir }
+    this._camTarget.set(pos.x, pos.y + 1.1, pos.z)
+    this.camera.lookAt(this._camTarget)
   }
 
   destroy() {
@@ -154,5 +159,6 @@ export class PlayerController {
     document.removeEventListener('mousemove',         this._onMouseMove)
     document.removeEventListener('pointerlockchange', this._onLockChange)
     document.exitPointerLock?.()
+    this._hint?.remove()
   }
 }

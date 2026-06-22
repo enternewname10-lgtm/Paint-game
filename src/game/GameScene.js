@@ -96,7 +96,7 @@ export class GameScene {
     this.hud = new HUD(
       this.myRole,
       this.prepTime,
-      pose => { this.myChar.setPose(pose); this.sync.syncPose(pose) },
+      pose => { this.controller.setPose(pose); this.sync.syncPose(pose) },
       () => this.paintSystem?.toggle()
     )
 

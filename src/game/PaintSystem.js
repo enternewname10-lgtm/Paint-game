@@ -1,202 +1,235 @@
 import * as THREE from 'three'
 
-// Preset swatches — muted, real-world palette (no neon)
-export const SWATCHES = [
-  '#f4ede0', // worn white
-  '#e0d4b8', // beige
-  '#c0956b', // wood
-  '#8b6040', // dark wood
-  '#b52b1e', // deep red
-  '#7a1a1a', // dark red
-  '#1a4f8a', // deep blue
-  '#2a6a9a', // mid blue
-  '#c9940a', // golden yellow
-  '#808070', // warm grey
-  '#505040', // dark grey
-  '#2c1c0c', // near black
-  '#c8b090', // sand
-  '#9a7a5a', // tan
-  '#4a7a4a', // olive green
-  '#7a5a8a', // muted purple
-  '#d8b080', // pale gold
-  '#a04030', // rust
+const SWATCHES = [
+  '#f4ede0','#e0d4b8','#c0956b','#8b6040',
+  '#b52b1e','#7a1a1a','#1a4f8a','#2a6a9a',
+  '#c9940a','#808070','#505040','#2c1c0c',
+  '#c8b090','#9a7a5a','#4a7a4a','#7a5a8a',
 ]
 
 export class PaintSystem {
   constructor(scene, camera, myCharacter, buildingMeshes, onPaintChange) {
-    this.scene         = scene
-    this.camera        = camera
-    this.myCharacter   = myCharacter
+    this.scene          = scene
+    this.camera         = camera
+    this.myCharacter    = myCharacter
     this.buildingMeshes = buildingMeshes
-    this.onPaintChange = onPaintChange  // (paintColors) => void
+    this.onPaintChange  = onPaintChange
 
-    this.currentColor = '#808080'
-    this.selectedPart = 'all'
+    this.active        = false
+    this.painting      = false
     this.eyedropActive = false
+    this.color         = '#c0956b'
+    this.brushRadius   = 32     // pixels on 512 canvas
+    this.raycaster     = new THREE.Raycaster()
 
     this._buildUI()
-    this._bindEyedrop()
+    this._bindEvents()
   }
 
+  // ── UI ──────────────────────────────────────────────────────
   _buildUI() {
-    this.pad = document.getElementById('paint-pad')
-    if (!this.pad) {
-      this.pad = document.createElement('div')
-      this.pad.id = 'paint-pad'
-      document.body.appendChild(this.pad)
-    }
+    // Small palette panel on the right
+    this.panel = document.createElement('div')
+    this.panel.id = 'brush-panel'
+    this.panel.style.cssText = `
+      position:fixed; right:18px; top:50%; transform:translateY(-50%);
+      width:190px; background:var(--white);
+      border:3px solid var(--dark); border-radius:var(--r);
+      box-shadow:var(--sh-lg); padding:14px;
+      display:none; z-index:30; pointer-events:all;
+      font-family:var(--font-body);
+    `
+    this.panel.innerHTML = `
+      <div style="font-family:var(--font-graf);font-size:18px;letter-spacing:2px;
+        text-align:center;margin-bottom:10px">🖌 BRUSH</div>
 
-    this.pad.innerHTML = `
-      <div class="paint-pad-title">🎨 PAINT PAD</div>
+      <!-- Colour preview / native picker -->
+      <div style="position:relative;margin-bottom:8px">
+        <div id="bp-preview" style="height:38px;border:3px solid var(--dark);
+          border-radius:var(--r-sm);box-shadow:var(--sh);cursor:pointer;
+          background:${this.color}"></div>
+        <input type="color" id="bp-picker" value="${this.color}"
+          style="position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%">
+      </div>
 
-      <!-- Color preview + native picker -->
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
-        <div class="paint-color-preview" id="pp-preview"
-          style="flex:1;background:${this.currentColor}"></div>
-        <label title="Custom color" style="cursor:pointer">
-          <div class="btn btn-sm" style="padding:8px">🖊</div>
-          <input type="color" id="pp-picker" value="${this.currentColor}"
-            style="position:absolute;opacity:0;pointer-events:none;width:0;height:0">
-        </label>
+      <!-- Swatches -->
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-bottom:9px">
+        ${SWATCHES.map(c => `
+          <div data-c="${c}" class="bp-sw" style="aspect-ratio:1;background:${c};
+            border:2px solid var(--dark);border-radius:4px;cursor:pointer;
+            box-shadow:1px 1px 0 var(--dark)"></div>
+        `).join('')}
       </div>
 
       <!-- Eyedropper -->
-      <button class="btn btn-sm btn-full" id="pp-eye" style="margin-bottom:10px">
-        💧 Sample Color
+      <button id="bp-eye" class="btn btn-sm btn-full" style="margin-bottom:8px">
+        💧 Sample wall color
       </button>
 
-      <!-- Swatches -->
-      <div class="paint-swatches" id="pp-swatches">
-        ${SWATCHES.map(c => `
-          <div class="swatch" style="background:${c}" data-color="${c}" title="${c}"></div>
-        `).join('')}
-      </div>
+      <!-- Brush size -->
+      <div style="font-family:var(--font-graf);font-size:12px;letter-spacing:1px;
+        color:var(--dark);margin-bottom:4px">BRUSH SIZE</div>
+      <input type="range" id="bp-size" min="8" max="90" value="32" style="width:100%">
 
-      <!-- Part selector -->
-      <div class="paint-part-label">PAINT PART</div>
-      <div class="paint-parts" id="pp-parts">
-        ${['all','head','torso','leftArm','rightArm','leftLeg','rightLeg'].map(p => `
-          <button class="part-btn ${p==='all'?'active':''}" data-part="${p}">
-            ${p === 'all' ? 'ALL' : p.replace(/([A-Z])/g, ' $1').toUpperCase()}
-          </button>
-        `).join('')}
-      </div>
-
-      <!-- Apply -->
-      <button class="btn btn-red btn-full" id="pp-apply" style="margin-top:10px">APPLY</button>
-      <button class="btn btn-sm btn-full" id="pp-close" style="margin-top:6px;background:transparent;box-shadow:none;border-color:var(--grey);color:var(--grey)">CLOSE  [P]</button>
+      <hr style="border:none;border-top:2px solid var(--surface2);margin:10px 0">
+      <div style="font-family:var(--font-marker);font-size:12px;color:var(--grey);
+        text-align:center">Click + drag on your character<br>to paint. [P] to exit.</div>
     `
+    document.body.appendChild(this.panel)
 
-    // Picker change
-    const picker = this.pad.querySelector('#pp-picker')
-    picker.addEventListener('input', e => this._setColor(e.target.value))
-    picker.parentElement.addEventListener('click', () => picker.click())
+    // Custom circular brush cursor
+    this.cursor = document.createElement('div')
+    this.cursor.style.cssText = `
+      position:fixed; pointer-events:none; border-radius:50%;
+      border:2px solid rgba(0,0,0,0.6);
+      transform:translate(-50%,-50%);
+      display:none; z-index:25; mix-blend-mode:multiply;
+    `
+    document.body.appendChild(this.cursor)
 
-    // Swatches
-    this.pad.querySelector('#pp-swatches').addEventListener('click', e => {
-      const sw = e.target.closest('[data-color]')
-      if (sw) this._setColor(sw.dataset.color)
-    })
-
-    // Part selector
-    this.pad.querySelector('#pp-parts').addEventListener('click', e => {
-      const btn = e.target.closest('[data-part]')
-      if (!btn) return
-      this.selectedPart = btn.dataset.part
-      this.pad.querySelectorAll('.part-btn').forEach(b => b.classList.remove('active'))
-      btn.classList.add('active')
-    })
-
-    // Apply
-    this.pad.querySelector('#pp-apply').addEventListener('click', () => {
-      this.applyPaint()
-    })
-
-    // Eyedropper
-    this.pad.querySelector('#pp-eye').addEventListener('click', () => {
-      this.eyedropActive = !this.eyedropActive
-      const btn = this.pad.querySelector('#pp-eye')
-      btn.textContent = this.eyedropActive ? '❌ Cancel Sample' : '💧 Sample Color'
-      btn.style.borderColor = this.eyedropActive ? 'var(--blue)' : ''
-      document.body.style.cursor = this.eyedropActive ? 'crosshair' : ''
-    })
-
-    // Close
-    this.pad.querySelector('#pp-close').addEventListener('click', () => this.toggle())
+    this._refreshCursor()
+    this._bindPanelEvents()
   }
 
-  _bindEyedrop() {
-    this._onCanvasClick = e => {
-      if (!this.eyedropActive) return
-      if (!this.pad.classList.contains('show')) return
+  _bindPanelEvents() {
+    const picker = this.panel.querySelector('#bp-picker')
+    picker.addEventListener('input', e => this._setColor(e.target.value))
+    // Clicking the preview div also opens the picker
+    this.panel.querySelector('#bp-preview').addEventListener('click', () => picker.click())
 
-      // Raycast from mouse into scene
-      const canvas = document.getElementById('game-canvas')
-      if (!canvas) return
-      const rect = canvas.getBoundingClientRect()
-      const nx = ((e.clientX - rect.left) / rect.width)  * 2 - 1
-      const ny = -((e.clientY - rect.top)  / rect.height) * 2 + 1
+    this.panel.querySelectorAll('.bp-sw').forEach(s =>
+      s.addEventListener('click', () => this._setColor(s.dataset.c))
+    )
 
-      const raycaster = new THREE.Raycaster()
-      raycaster.setFromCamera({ x: nx, y: ny }, this.camera)
+    this.panel.querySelector('#bp-eye').addEventListener('click', () => {
+      this.eyedropActive = !this.eyedropActive
+      const btn = this.panel.querySelector('#bp-eye')
+      btn.textContent = this.eyedropActive ? '❌ Cancel sample' : '💧 Sample wall color'
+      btn.style.borderColor = this.eyedropActive ? 'var(--blue)' : ''
+      this.cursor.style.borderStyle = this.eyedropActive ? 'dashed' : 'solid'
+    })
 
-      // Don't pick own character
-      const targets = this.buildingMeshes.filter(m => {
-        let isMe = false
-        this.myCharacter.group.traverse(c => { if (c === m) isMe = true })
-        return !isMe
-      })
-
-      const hits = raycaster.intersectObjects(targets, true)
-      if (hits.length > 0) {
-        const obj = hits[0].object
-        if (obj.material?.color) {
-          const hex = '#' + obj.material.color.getHexString()
-          this._setColor(hex)
-        }
-      }
-
-      this.eyedropActive = false
-      const btn = this.pad.querySelector('#pp-eye')
-      if (btn) { btn.textContent = '💧 Sample Color'; btn.style.borderColor = '' }
-      document.body.style.cursor = ''
-    }
-    document.addEventListener('click', this._onCanvasClick)
+    this.panel.querySelector('#bp-size').addEventListener('input', e => {
+      this.brushRadius = parseInt(e.target.value)
+      this._refreshCursor()
+    })
   }
 
   _setColor(hex) {
-    this.currentColor = hex
-    const preview = this.pad.querySelector('#pp-preview')
+    this.color = hex
+    const preview = this.panel.querySelector('#bp-preview')
     if (preview) preview.style.background = hex
-    const picker  = this.pad.querySelector('#pp-picker')
-    if (picker)  picker.value = hex
-
-    // Highlight matching swatch
-    this.pad.querySelectorAll('.swatch').forEach(s => {
-      s.classList.toggle('selected', s.dataset.color === hex)
-    })
+    const picker = this.panel.querySelector('#bp-picker')
+    if (picker) picker.value = hex
+    this._refreshCursor()
   }
 
-  applyPaint() {
-    this.myCharacter.setPaint(this.selectedPart, this.currentColor)
-    // Fire callback so GameScene can sync to Firebase
-    this.onPaintChange({ ...this.myCharacter.colors })
+  _refreshCursor() {
+    // Screen-space cursor size ≈ texture radius scaled to ~0.4 screen px per texel
+    const r = Math.max(8, this.brushRadius * 0.42)
+    const d = r * 2
+    this.cursor.style.width  = d + 'px'
+    this.cursor.style.height = d + 'px'
+    this.cursor.style.background = this.color + '40'
+    this.cursor.style.borderColor = this.color
   }
 
+  // ── Events ──────────────────────────────────────────────────
+  _bindEvents() {
+    this._onMove = e => {
+      if (!this.active) return
+      this.cursor.style.left = e.clientX + 'px'
+      this.cursor.style.top  = e.clientY + 'px'
+      if (this.painting && !this.eyedropActive) this._paint(e.clientX, e.clientY)
+    }
+
+    this._onDown = e => {
+      if (!this.active || e.button !== 0) return
+      if (this.eyedropActive) { this._eyedrop(e.clientX, e.clientY); return }
+      this.painting = true
+      this._paint(e.clientX, e.clientY)
+    }
+
+    this._onUp = e => {
+      if (e.button !== 0) return
+      if (this.painting) {
+        this.painting = false
+        // Sync approximate colours to Firebase after each stroke
+        this.onPaintChange(this.myCharacter.getColors())
+      }
+    }
+
+    document.addEventListener('mousemove', this._onMove)
+    document.addEventListener('mousedown', this._onDown)
+    document.addEventListener('mouseup',   this._onUp)
+  }
+
+  // ── Paint stroke ─────────────────────────────────────────────
+  _paint(screenX, screenY) {
+    const canvas = document.getElementById('game-canvas')
+    if (!canvas) return
+    const r   = canvas.getBoundingClientRect()
+    const nx  = ((screenX - r.left) / r.width)  * 2 - 1
+    const ny  = -((screenY - r.top)  / r.height) * 2 + 1
+
+    this.raycaster.setFromCamera({ x: nx, y: ny }, this.camera)
+    const hits = this.raycaster.intersectObjects(this.myCharacter.getMeshes(), false)
+    if (!hits.length) return
+
+    const hit = hits[0]
+    if (!hit.uv) return
+    this.myCharacter.paintAtUV(hit.object, hit.uv.x, hit.uv.y, this.color, this.brushRadius)
+  }
+
+  // ── Eyedropper ───────────────────────────────────────────────
+  _eyedrop(screenX, screenY) {
+    const canvas = document.getElementById('game-canvas')
+    if (!canvas) return
+    const r  = canvas.getBoundingClientRect()
+    const nx = ((screenX - r.left) / r.width)  * 2 - 1
+    const ny = -((screenY - r.top)  / r.height) * 2 + 1
+
+    this.raycaster.setFromCamera({ x: nx, y: ny }, this.camera)
+
+    const charSet = new Set(this.myCharacter.getMeshes())
+    const targets = this.buildingMeshes.filter(m => !charSet.has(m))
+    const hits    = this.raycaster.intersectObjects(targets, true)
+
+    if (hits.length > 0) {
+      const mat = hits[0].object.material
+      if (mat?.color) this._setColor('#' + mat.color.getHexString())
+    }
+
+    this.eyedropActive = false
+    const btn = this.panel.querySelector('#bp-eye')
+    if (btn) { btn.textContent = '💧 Sample wall color'; btn.style.borderColor = '' }
+    this.cursor.style.borderStyle = 'solid'
+  }
+
+  // ── Toggle ───────────────────────────────────────────────────
   toggle() {
-    this.pad.classList.toggle('show')
-    if (!this.pad.classList.contains('show')) {
+    this.active = !this.active
+    this.panel.style.display  = this.active ? 'block' : 'none'
+    this.cursor.style.display = this.active ? 'block' : 'none'
+
+    if (this.active) {
+      // Release pointer lock so mouse cursor is free
+      document.exitPointerLock?.()
+    } else {
+      this.painting      = false
       this.eyedropActive = false
-      document.body.style.cursor = ''
+      // Re-engage pointer lock for movement
+      document.getElementById('game-canvas')?.requestPointerLock?.()
     }
   }
 
-  isOpen() {
-    return this.pad.classList.contains('show')
-  }
+  isOpen() { return this.active }
 
   destroy() {
-    document.removeEventListener('click', this._onCanvasClick)
-    this.pad.classList.remove('show')
+    document.removeEventListener('mousemove', this._onMove)
+    document.removeEventListener('mousedown', this._onDown)
+    document.removeEventListener('mouseup',   this._onUp)
+    this.panel.remove()
+    this.cursor.remove()
   }
 }
