@@ -29,7 +29,6 @@ export class Character {
     }
     this.pose = 'stand'
     this._build()
-    this._initSprings()
   }
 
   _makeMat(partName) {
@@ -168,138 +167,91 @@ export class Character {
     }
   }
 
-  // ── Spring physics init ──────────────────────────────────────
-  _initSprings() {
-    // sp(restAngle, stiffness, damping)
-    // Low stiffness = floppy. Low damping = overshoots a lot (Gang Beasts feel).
-    const sp = (rest, k, d) => ({ vel: 0, cur: rest, rest, k, d })
-    this._sp = {
-      lax: sp(0,     3.2, 2.2),   // left  arm X  — very floppy
-      laz: sp(0.28,  3.2, 2.2),   // left  arm Z
-      rax: sp(0,     3.2, 2.2),   // right arm X
-      raz: sp(-0.28, 3.2, 2.2),   // right arm Z
-      llx: sp(0,     11,  4.0),   // left  leg X  — stiffer (need to walk)
-      rlx: sp(0,     11,  4.0),   // right leg X
-      hx:  sp(0,     9,   5.0),   // head  X
-      tx:  sp(0,     14,  6.0),   // torso X lean
-    }
-    this._step = 0          // step-cycle phase accumulator
-    this._t    = 0          // total time
-    this._vel  = { x: 0, z: 0 }  // character velocity (written by controller)
-  }
-
-  // Single spring integrator — returns new angle
-  _su(s, dt, ext = 0) {
-    const force = -(s.cur - s.rest) * s.k + ext
-    s.vel += force * dt
-    s.vel *= Math.max(0, 1 - s.d * dt)   // damping
-    s.cur += s.vel * dt
-    s.cur  = Math.max(-2.6, Math.min(2.6, s.cur))  // hard clamp
-    return s.cur
-  }
-
-  // ── Main animation driver ─────────────────────────────────────
+  // ── Animation ────────────────────────────────────────────────
   animate(delta, moving, pose, running = false) {
-    this._t    += delta
-    const dt    = Math.min(delta, 0.05)   // guard against huge deltas
-    const sp    = this._sp
-    const step  = this._step
-    const vz    = this._vel.z   // forward velocity
-    const vx    = this._vel.x   // side velocity
+    this._t      = (this._t      || 0) + delta
+    this._phase  = (this._phase  || 0) + delta * (running ? 9 : moving ? 5.5 : 0.5)
 
-    // Inertia: moving forward pushes arms backward
-    const armInertia = -vz * 0.22
+    const sin = Math.sin(this._phase)
+    const lp  = THREE.MathUtils.lerp
+    const t   = this._t
+
+    // ── compute targets ──────────────────────────────────────
+    let lax, rax, laz, raz, llx, rlx, tx, hx
 
     if (pose === 'prone') {
-      // ── Prone: arms reach out, breathing pulse ─────────────
-      sp.lax.rest = 0.45;  sp.rax.rest = -0.45
-      sp.laz.rest = 0.55;  sp.raz.rest = -0.55
-      sp.llx.rest = 0;     sp.rlx.rest = 0
-      sp.tx.rest  = 0;     sp.hx.rest  = 0
-      const breathe = Math.sin(this._t * 0.85) * 0.009
-      this.torsoMesh.position.y = THREE.MathUtils.lerp(this.torsoMesh.position.y, 0.88 + breathe, 0.05)
+      lax = 0.45;  rax = -0.45
+      laz = 0.55;  raz = -0.55
+      llx = 0;     rlx = 0
+      tx  = 0;     hx  = 0
 
     } else if (pose === 'crouch') {
-      // ── Crouch ─────────────────────────────────────────────
-      const freq = 4.2
-      if (moving) this._step += dt * freq * Math.PI * 2
-      const s = Math.sin(step)
-      sp.llx.rest =  s * (moving ? 0.28 : 0)
-      sp.rlx.rest = -s * (moving ? 0.28 : 0)
-      sp.lax.rest =  s * (moving ? -0.15 : 0) + armInertia
-      sp.rax.rest = -s * (moving ? -0.15 : 0) + armInertia
-      sp.laz.rest = 0.48;  sp.raz.rest = -0.48   // arms wide for balance
-      sp.tx.rest  = 0;     sp.hx.rest  = 0
+      laz = 0.55;  raz = -0.55          // arms wide for balance
+      if (moving) {
+        lax = -sin * 0.18;  rax = sin * 0.18
+        llx =  sin * 0.28;  rlx = -sin * 0.28
+      } else {
+        const sw = Math.sin(t * 0.9) * 0.06
+        lax = sw;  rax = -sw
+        llx = 0;   rlx = 0
+      }
+      tx = 0;  hx = 0
 
-      const shift = Math.sin(this._t * 0.9) * 0.03
-      this.torsoMesh.position.y = THREE.MathUtils.lerp(this.torsoMesh.position.y, 0.88 + shift, 0.05)
-      this.headMesh.position.y  = THREE.MathUtils.lerp(this.headMesh.position.y,  1.42, 0.08)
+    } else if (running) {
+      // Gang Beasts run — arms thrown UP and behind, always lagging (slow lerp below)
+      lax = -1.0 + sin * 0.5    // up + oscillating
+      rax = -1.0 - sin * 0.5    // up + opposite phase
+      laz =  0.68                // flared wide
+      raz = -0.68
+      llx =  sin * 0.70
+      rlx = -sin * 0.70
+      tx  = -0.18                // lean forward
+      hx  =  0.10
+
+    } else if (moving) {
+      lax = -sin * 0.38
+      rax =  sin * 0.38
+      laz =  0.22
+      raz = -0.22
+      llx =  sin * 0.44
+      rlx = -sin * 0.44
+      tx  = 0;  hx = 0
 
     } else {
-      // ── Stand: walk / run / idle ────────────────────────────
-      const freq = running ? 8.5 : (moving ? 5.5 : 0.4)
-      if (moving || running) this._step += dt * freq * Math.PI * 2
-      const s = Math.sin(step)
-
-      if (running) {
-        // Gang Beasts run — arms fling UP and back, flail wildly
-        // Rest position is way behind/up so spring never fully catches up → constant flop
-        sp.lax.rest = -1.05 + s *  0.55 + armInertia   // left arm up, oscillating
-        sp.rax.rest = -1.05 + s * -0.55 + armInertia   // right arm up, opposite phase
-        sp.laz.rest =  0.55 + Math.abs(s) * 0.25        // arms flare outward when up
-        sp.raz.rest = -0.55 - Math.abs(s) * 0.25
-        sp.llx.rest =  s * 0.65
-        sp.rlx.rest = -s * 0.65
-        sp.tx.rest  = -0.20    // lean forward
-        sp.hx.rest  =  0.12   // head back a little (looking where they're going)
-
-        const bob = Math.abs(s) * 0.032
-        this.torsoMesh.position.y = THREE.MathUtils.lerp(this.torsoMesh.position.y, 0.88 - bob, 0.28)
-        this.headMesh.position.y  = THREE.MathUtils.lerp(this.headMesh.position.y,  1.42 - bob, 0.28)
-
-      } else if (moving) {
-        // Normal walk — arms swing opposite to legs with physics
-        sp.lax.rest = -s * 0.35 + armInertia
-        sp.rax.rest =  s * 0.35 + armInertia
-        sp.laz.rest =  0.22 + s * 0.06
-        sp.raz.rest = -0.22 - s * 0.06
-        sp.llx.rest =  s * 0.44
-        sp.rlx.rest = -s * 0.44
-        sp.tx.rest  = 0
-        sp.hx.rest  = 0
-
-        const bob = Math.abs(s) * 0.014
-        this.torsoMesh.position.y = THREE.MathUtils.lerp(this.torsoMesh.position.y, 0.88 - bob, 0.22)
-        this.headMesh.position.y  = THREE.MathUtils.lerp(this.headMesh.position.y,  1.42 - bob, 0.22)
-
-      } else {
-        // Idle — gentle breathing + arms sway + tiny random wobble
-        const breathe = Math.sin(this._t * 1.25) * 0.009
-        const sway    = Math.sin(this._t * 0.72) * 0.045
-        sp.lax.rest =  0.12 + sway * 0.5
-        sp.rax.rest =  0.12 - sway * 0.5
-        sp.laz.rest =  0.28 + sway * 0.18
-        sp.raz.rest = -0.28 - sway * 0.18
-        sp.llx.rest =  0;  sp.rlx.rest = 0
-        sp.tx.rest  =  0;  sp.hx.rest  = Math.sin(this._t * 0.65) * 0.04
-
-        this.torsoMesh.position.y = THREE.MathUtils.lerp(this.torsoMesh.position.y, 0.88 + breathe, 0.05)
-        this.headMesh.position.y  = THREE.MathUtils.lerp(this.headMesh.position.y,  1.42 + breathe, 0.05)
-      }
+      // Idle: breathing + gentle sway
+      const sw = Math.sin(t * 0.8) * 0.045
+      lax = 0.12 + sw;           rax = 0.12 - sw
+      laz = 0.28 + Math.abs(sw) * 0.2
+      raz = -(0.28 + Math.abs(sw) * 0.2)
+      llx = 0;  rlx = 0;  tx = 0
+      hx  = Math.sin(t * 0.65) * 0.03
     }
 
-    // Side-velocity makes arms drift sideways (turning feel)
-    const sideForce = vx * 0.12
-    const u = (s, ext) => this._su(s, dt, ext)
+    // ── apply with lerp ───────────────────────────────────────
+    // Arms: SLOW lerp when running → they always lag behind = floppy
+    const armA = running ? 0.045 : 0.15
+    const legA = 0.25
+    const bodA = 0.10
 
-    this.leftArmMesh.rotation.x  = u(sp.lax,  sideForce * 0.5)
-    this.leftArmMesh.rotation.z  = u(sp.laz,  sideForce)
-    this.rightArmMesh.rotation.x = u(sp.rax,  sideForce * 0.5)
-    this.rightArmMesh.rotation.z = u(sp.raz, -sideForce)
-    this.leftLegMesh.rotation.x  = u(sp.llx,  0)
-    this.rightLegMesh.rotation.x = u(sp.rlx,  0)
-    this.torsoMesh.rotation.x    = u(sp.tx,   0)
-    this.headMesh.rotation.x     = u(sp.hx,   0)
+    this.leftArmMesh.rotation.x  = lp(this.leftArmMesh.rotation.x,  lax, armA)
+    this.leftArmMesh.rotation.z  = lp(this.leftArmMesh.rotation.z,  laz, armA)
+    this.rightArmMesh.rotation.x = lp(this.rightArmMesh.rotation.x, rax, armA)
+    this.rightArmMesh.rotation.z = lp(this.rightArmMesh.rotation.z, raz, armA)
+    this.leftLegMesh.rotation.x  = lp(this.leftLegMesh.rotation.x,  llx, legA)
+    this.rightLegMesh.rotation.x = lp(this.rightLegMesh.rotation.x, rlx, legA)
+    this.torsoMesh.rotation.x    = lp(this.torsoMesh.rotation.x,    tx,  bodA)
+    this.headMesh.rotation.x     = lp(this.headMesh.rotation.x,     hx,  bodA)
+
+    // ── body bob / breathe ────────────────────────────────────
+    if (moving || running) {
+      const bob = Math.abs(sin) * (running ? 0.032 : 0.016)
+      this.headMesh.position.y  = lp(this.headMesh.position.y,  1.42 - bob, 0.28)
+      this.torsoMesh.position.y = lp(this.torsoMesh.position.y, 0.88 - bob, 0.28)
+    } else {
+      const breathe = Math.sin(t * 1.2) * 0.008
+      this.headMesh.position.y  = lp(this.headMesh.position.y,  1.42 + breathe, 0.05)
+      this.torsoMesh.position.y = lp(this.torsoMesh.position.y, 0.88 + breathe, 0.05)
+    }
   }
 
   getMeshes() { return Object.values(this.parts) }
