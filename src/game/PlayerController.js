@@ -24,8 +24,10 @@ export class PlayerController {
     this.pose    = 'stand'
     this.time    = 0
 
-    this._camPos = new THREE.Vector3()
+    this._camPos    = new THREE.Vector3()
     this._camTarget = new THREE.Vector3()
+    this._prevPos   = new THREE.Vector3()
+    this._charVel   = { x: 0, z: 0 }
 
     this._buildHint()
     this._bindInput()
@@ -126,6 +128,15 @@ export class PlayerController {
         this.character.group.rotation.y, angle, 0.2
       )
     }
+
+    // Compute character velocity for physics (world-space per second)
+    const cp = this.character.group.position
+    this._charVel.x = (cp.x - this._prevPos.x) / Math.max(delta, 0.001)
+    this._charVel.z = (cp.z - this._prevPos.z) / Math.max(delta, 0.001)
+    this._prevPos.set(cp.x, cp.y, cp.z)
+
+    // Write velocity into character so its spring system can use it
+    this.character._vel = this._charVel
 
     this.character.animate(delta, this.moving, this.pose, this.running)
     this._updateCamera()
